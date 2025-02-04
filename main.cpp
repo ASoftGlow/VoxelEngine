@@ -12,6 +12,7 @@
 #include <limits>
 #include <optional>
 #include <set>
+#include <thread>
 
 #define FNL_IMPL
 #include "FastNoiseLite.hpp"
@@ -20,6 +21,8 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONCe
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+
+static float semiRandomFloat(float x, float y, float z);
 
 const uint32_t WIDTH = 1920;
 const uint32_t HEIGHT = 1280;
@@ -78,6 +81,22 @@ struct SwapChainSupportDetails {
     std::vector<VkSurfaceFormatKHR> formats;
     std::vector<VkPresentModeKHR> presentModes;
 };
+
+//=================
+//  Materials
+//-----------------
+#define MAT_AIR 0
+#define MAT_STONE 1
+#define MAT_STONE2 2
+#define MAT_STONE3 3
+#define MAT_GRASS 9
+#define MAT_FLOWER 10
+#define MAT_WATER 19
+// ================
+
+#define voxel_mat(voxel) (voxel & 0b11111)
+#define MAT_IS_STONE(mat) (mat >= MAT_STONE && mat <= MAT_STONE3)
+#define MAT_HAS_COLLISION(mat) (mat > MAT_AIR && mat < MAT_FLOWER)
 
 class VoxelEngine {
 public:
@@ -158,7 +177,7 @@ private:
     // Camera
 
     glm::vec3 cameraTargetPoint = glm::vec3(1.0f, 0.0f, 0.0f);
-    glm::vec3 cameraPosition = glm::vec3(-512.0f, -512.0f, -512.0f);
+    glm::vec3 cameraPosition = glm::vec3(-64, -80, -64);//glm::vec3(-512.0f, -512.0f, -512.0f);
 
     glm::vec3 cameraVelocity = glm::vec3(0.0f, 0.0f, 0.0f);
 
@@ -216,6 +235,9 @@ private:
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Voxels", nullptr, nullptr);
+        const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
+        glfwSetWindowPos(window, (mode->width - WIDTH) / 2, 32);
+
         glfwSetWindowUserPointer(window, this);
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
@@ -232,7 +254,7 @@ private:
         pickPhysicalDevice();
         createLogicalDevice();
         createSwapChain();
-        CreateTransformUBO();
+        createTransformUBO();
         createImageViews();
         createRenderPass();
         createCommandPool();
@@ -362,7 +384,7 @@ private:
         createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
         createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        createInfo.messageType = /*VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |*/ VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         createInfo.pfnUserCallback = debugCallback;
     }
 
@@ -689,14 +711,14 @@ private:
     void createRaytracingStorageImage()
     {
         raytracingStorageImage.resize(MAX_FRAMES_IN_FLIGHT);
-        raytracingStorageImageView.reserve(MAX_FRAMES_IN_FLIGHT);
+        raytracingStorageImageView.resize(MAX_FRAMES_IN_FLIGHT);
         
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
             VkImageCreateInfo imageCreateInfo = {};
             imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
             imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-            imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            imageCreateInfo.format = VK_FORMAT_R16G16B16A16_UNORM;
             imageCreateInfo.extent.width = swapChainExtent.width;
             imageCreateInfo.extent.height = swapChainExtent.height;
             imageCreateInfo.extent.depth = 1;
@@ -750,7 +772,7 @@ private:
             viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
             viewCreateInfo.image = raytracingStorageImage[i];
             viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            viewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            viewCreateInfo.format = VK_FORMAT_R16G16B16A16_UNORM;
             viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             viewCreateInfo.subresourceRange.baseMipLevel = 0;
             viewCreateInfo.subresourceRange.levelCount = 1;
@@ -762,7 +784,7 @@ private:
                 throw std::runtime_error("failed to creaet raytracing image view!");
             }
 
-            transitionImageLayout(raytracingStorageImage[i], VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 1);
+            transitionImageLayout(raytracingStorageImage[i], VK_FORMAT_R16G16B16A16_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 1);
         }
         
     }
@@ -863,45 +885,7 @@ private:
         
         transitionImageLayout(voxelTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, 1);
 
-        // Voxel Data
-
-        voxelData = new uint8_t[1024*1024*1024]();
-
-        for (int i = 0; i < 1024*1024*1024; i++)
-        {
-            voxelData[i] = 0b11100000;
-        }
-
-        for (int z = 0; z < 1024; z+=2)
-        {
-            for (int y = 0; y < 1024; y+=2)
-            {
-                for (int x = 0; x < 1024; x+=2)
-                {
-                    voxelData[z * 1024 * 1024 + y * 1024 + x] = 0b11100001;
-                }   
-            }   
-        }
-
-        for (int z = 0; z < 1024; z++)
-        {
-            for (int y = 0; y < 1024; y++)
-            {
-                for (int x = 0; x < 1024; x++)
-                {
-                    float v = noise.GetNoise(x * 0.1f, y * 0.1f, z * 0.5f);
-                    if (v > 0.1)
-                    {
-                        voxelData[z * 1024 * 1024 + y * 1024 + x] = 0b11100000;
-                    }
-                    else
-                    {
-                        voxelData[z * 1024 * 1024 + y * 1024 + x] = 0b11100001;
-                    }
-                }   
-            }   
-            printf("Progress: %f\n", z / 1024.0f);
-        }
+        GenerateTerrain();
 
         // Upper
         {
@@ -1093,6 +1077,86 @@ private:
             voxelChunkMapData[i] = i;
         }
 }
+    }
+
+    void GenerateTerrain()
+    {
+        // Voxel Data
+        auto it = std::chrono::system_clock::now();
+        voxelData = new uint8_t[1024 * 1024 * 1024]();
+#define vox(x,y,z) voxelData[(z) * 1024 * 1024 + (y) * 1024 + (x)]
+
+#define TERRAIN_SCALE 4
+#define TERRAIN_AREA (1024/4)
+
+        //printf("hwc: %i", std::thread::hardware_concurrency());
+        printf("Generating\n");
+        const int WORKERS = 12;
+        const int SLICE_THICKNESS = TERRAIN_AREA / WORKERS;
+
+        std::thread* threads[WORKERS]{};
+
+        for (int i = 0; i < WORKERS; i++)
+        {
+            threads[i] = new std::thread{&TerrainWork, voxelData, &noise, i * SLICE_THICKNESS, SLICE_THICKNESS};
+        }
+
+        puts("");
+        for (int i = 0; i < WORKERS; i++)
+        {
+            threads[i]->join();
+            printf("\rProgress: %.1f", (float)i / WORKERS * 100);
+        }
+
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - it);
+        printf("\nTIME: %lli\n\n", ms.count());
+    }
+
+    static void TerrainWork(uint8_t* voxelData, FastNoiseLite* noise, int z0, int SLICE_THICKNESS)
+    {
+        for (int z = z0; z < z0 + SLICE_THICKNESS; z++)
+        {
+            for (int y = 0; y < TERRAIN_AREA; y++)
+            {
+                for (int x = 0; x < TERRAIN_AREA; x++)
+                {
+                    uint8_t base = 0b11100000;
+                    float v = noise->GetNoise(x * 0.1f * TERRAIN_SCALE, y * 0.1f * TERRAIN_SCALE, z * 0.4f * TERRAIN_SCALE);
+
+                    int material = v <= 0.1;
+                    if (material != MAT_AIR)
+                    {
+                        if (z > 0 && (voxel_mat(vox(x, y, z - 1)) == MAT_AIR))
+                        {
+                            material = MAT_GRASS;
+                            float v = semiRandomFloat(x, y, z);
+                            if (v < 0.08)
+                            {
+                                vox(x, y, z - 1) |= MAT_GRASS;
+
+                                if (z > 1 && v < 0.008)
+                                {
+                                    vox(x, y, z - 2) |= MAT_FLOWER;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            float v = noise->GetNoise(x * 1.5f * TERRAIN_SCALE, y * 1.5f * TERRAIN_SCALE, z * 1.f * TERRAIN_SCALE);
+                            int32_t i = *((int32_t*)&v);
+                            int32_t i2 = i | 9;
+                            float v2 = *((float*)(&i2));
+                            if (v2 < -0.15)
+                            {
+                                material = (i & 15) < 2 ? MAT_STONE2 : MAT_STONE3;
+                            }
+                        }
+                    }
+
+                    vox(x, y, z) = base | material;
+                }
+            }
+        }
     }
 
     void UpdateVoxels(VkCommandBuffer commandBuffer, void* data, uint8_t section)
@@ -1691,13 +1755,13 @@ private:
         }
         if (imageIndex == 0)
         {
-                transitionImageLayout(commandBuffer, voxelChunkMapTexture, VK_FORMAT_R16_UINT, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
-                transitionImageLayout(commandBuffer, voxelUpperTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
-                transitionImageLayout(commandBuffer, voxelTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
-        UpdateVoxels(commandBuffer, voxelData, section);
-                transitionImageLayout(commandBuffer, voxelTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, 1);
-                transitionImageLayout(commandBuffer, voxelUpperTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, 1);
-                transitionImageLayout(commandBuffer, voxelChunkMapTexture, VK_FORMAT_R16_UINT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, 1);
+            transitionImageLayout(commandBuffer, voxelChunkMapTexture, VK_FORMAT_R16_UINT, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+            transitionImageLayout(commandBuffer, voxelUpperTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+            transitionImageLayout(commandBuffer, voxelTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+            UpdateVoxels(commandBuffer, voxelData, section);
+            transitionImageLayout(commandBuffer, voxelTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, 1);
+            transitionImageLayout(commandBuffer, voxelUpperTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, 1);
+            transitionImageLayout(commandBuffer, voxelChunkMapTexture, VK_FORMAT_R16_UINT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, 1);
         }
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, raytracingPipeline);
@@ -1930,7 +1994,7 @@ private:
         throw std::runtime_error("failed to find suitable memory type!");
     }
 
-    void CreateTransformUBO()
+    void createTransformUBO()
     {
         VkDeviceSize bufferSize = sizeof(TransformUBO);
 
@@ -1965,7 +2029,7 @@ private:
         memcpy(uniformBuffersMapped, &ubo, sizeof(TransformUBO));
 
         ubo.view = glm::mat4(1.0);
-        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 1000.0f);
+        ubo.proj = glm::perspective(glm::radians(70.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 1000.0f);
         ubo.proj[1][1] *= -1;
         ubo.proj = glm::inverse(ubo.proj);
         
@@ -2000,52 +2064,65 @@ private:
 
     void UpdateUBO()
     {
-        printf("POSITION: %f %f %f\n", cameraPosition.x, cameraPosition.y, cameraPosition.z);
-        printf("DELTA TIME: %f\n", deltaTime);
-
         cameraPosition.z += cameraVelocity.z * deltaTime;
         cameraTargetPoint.z += cameraVelocity.z * deltaTime;
 
         glm::ivec3 intCameraPosition = glm::ivec3(cameraPosition) * -1;
 
 
-        uint16_t materials = 0;
+        // floor
+        bool is_grounded = false;
         for (int x = -1; x < 2; x++)
         {
             for (int y = -1; y < 2; y++)
             {
-                materials += (voxelData[(intCameraPosition.z+20) * 1024*1024 + (intCameraPosition.y+y)*1024 + (intCameraPosition.x+x)] & 0b11111);
+                is_grounded |= MAT_HAS_COLLISION(voxel_mat(vox(intCameraPosition.x + x, intCameraPosition.y + y, intCameraPosition.z + 20)));
+            }
+        }
+
+        // ceiling
+        bool is_ouch = false;
+        for (int x = -1; x < 2; x++)
+        {
+            for (int y = -1; y < 2; y++)
+            {
+                is_ouch |= MAT_HAS_COLLISION(voxel_mat(vox(intCameraPosition.x + x, intCameraPosition.y + y, intCameraPosition.z - 4)));
             }
         }
 
 
-
-        printf("VOXEL UNDER %i\n", voxelData[(intCameraPosition.z) * 1024*1024 + intCameraPosition.y*1024 + intCameraPosition.x] & 0b11111);
-        if (materials > 0)
+        if (is_grounded)
         {
             cameraVelocity.z = 0;
         }
+        else if (is_ouch)
+        {
+            cameraVelocity.z = -fabsf(cameraVelocity.z) * 0.8;
+        }
         else
         {
-
             cameraVelocity.z -= 9.8 * 7 * deltaTime;
         }
 
         if (isMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT)) {
-        // Hide the cursor and capture mouse movement
-        hideCursor();
+            // Hide the cursor and capture mouse movement
+            hideCursor();
 
-        float deltaTime = 0.1f;
+            float deltaTime = 0.1f;
 
-        cameraTargetPoint.z = cameraPosition.z;
-        if (isKeyPressed(GLFW_KEY_S)) { cameraPosition += movementSpeed * deltaTime * glm::normalize(cameraTargetPoint - cameraPosition); }
-            if (isKeyPressed(GLFW_KEY_W)) { cameraPosition -= movementSpeed * deltaTime * glm::normalize(cameraTargetPoint - cameraPosition); }
-            if (isKeyPressed(GLFW_KEY_D)) { cameraPosition -= glm::normalize(glm::cross(cameraTargetPoint - cameraPosition, glm::vec3(0.0f, 0.0f, 1.0f))) * movementSpeed * deltaTime; }
-            if (isKeyPressed(GLFW_KEY_A)) { cameraPosition += glm::normalize(glm::cross(cameraTargetPoint - cameraPosition, glm::vec3(0.0f, 0.0f, 1.0f))) * movementSpeed * deltaTime; }
+            movementSpeed = isKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 20 : 7.0;
+            
+            if (isKeyPressed(GLFW_KEY_S)) { cameraPosition += movementSpeed * deltaTime * glm::normalize(cameraTargetPoint - cameraPosition) * glm::vec3(1, 1, 0); }
+            if (isKeyPressed(GLFW_KEY_W)) { cameraPosition -= movementSpeed * deltaTime * glm::normalize(cameraTargetPoint - cameraPosition) * glm::vec3(1, 1, 0); }
+            if (isKeyPressed(GLFW_KEY_D)) { cameraPosition -= glm::normalize(glm::cross(cameraTargetPoint - cameraPosition, glm::vec3(0.0f, 0.0f, 1.0f))) * movementSpeed * deltaTime * glm::vec3(1, 1, 0); }
+            if (isKeyPressed(GLFW_KEY_A)) { cameraPosition += glm::normalize(glm::cross(cameraTargetPoint - cameraPosition, glm::vec3(0.0f, 0.0f, 1.0f))) * movementSpeed * deltaTime * glm::vec3(1, 1, 0); }
 
             // Q and E for vertical movement
             if (isKeyPressed(GLFW_KEY_Q)) { cameraPosition.z -= movementSpeed * 2 * deltaTime; }
-            if (isKeyPressed(GLFW_KEY_SPACE)) { cameraPosition.z += movementSpeed * 2 * deltaTime; }
+            if ((isKeyPressed(GLFW_KEY_SPACE) || isKeyPressed(GLFW_KEY_E)) && is_grounded)
+            {
+                cameraVelocity.z += 400 * deltaTime;
+            }
 
             double currentMouseX, currentMouseY;
             glfwGetCursorPos(window, &currentMouseX, &currentMouseY);
@@ -2088,6 +2165,8 @@ private:
         }
 
         ubo.view = glm::inverse(glm::lookAt(cameraPosition, cameraTargetPoint, glm::vec3(0.0f, 0.0f, 1.0f)));
+
+        printf("\rPOSITION: %f %f %f\tDELTA TIME: %f\to: %i", cameraPosition.x, cameraPosition.y, cameraPosition.z, deltaTime, is_ouch);
 
         memcpy(uniformBuffersMapped, &ubo, sizeof(TransformUBO));
     }
@@ -2464,6 +2543,20 @@ private:
         return VK_FALSE;
     }
 };
+
+static float semiRandomFloat(float x, float y, float z) {
+    // A simple hashing function using the input vector components
+    uint32_t hash = x * 123456789 + y * 987654321 + z * 567890123;
+
+    // A bitwise operation to mix the hash value
+    hash = (hash ^ (hash >> 21)) * 2654435761u;
+    hash = hash ^ (hash >> 21);
+    hash = hash * 668265263;
+    hash = hash ^ (hash >> 21);
+
+    // Return a float between 0 and 1 based on the hash
+    return (float)(hash & 0xFFFFFFF) / (float)0xFFFFFFF;
+}
 
 int main() {
     VoxelEngine app;

@@ -1,0 +1,4 @@
+Build/
+.vscode
+*.spv
+Lib/vulkan.lib
