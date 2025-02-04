@@ -17,6 +17,18 @@ layout (set = 0, binding = 1) uniform Transform
     mat4 invproj;
 } transform;
 
+//=================
+//  Materials
+//-----------------
+#define MAT_AIR 0
+#define MAT_STONE 1
+#define MAT_STONE2 2
+#define MAT_STONE3 3
+#define MAT_GRASS 9
+#define MAT_FLOWER 10
+#define MAT_WATER 19
+// ================
+
 bool RayIntersectsCube(vec3 corner, float size, vec3 rayOrigin, vec3 rayDir, out float tMin, out float tMax) {
     // The cube is defined from corner (0, 0, 0) to corner (size, size, size)
     vec3 minBound = corner;                  // Minimum corner at (0,0,0)
@@ -93,9 +105,44 @@ float semiRandomFloat(ivec3 inp) {
     return float(hash & 0xFFFFFFF) / float(0xFFFFFFF);
 }
 
-vec4 calculateColor(vec3 rayOrigin, vec3 rayDir)
+const vec3 FOG_COLOR = vec3(138.0/256.0, 236.0/256.0, 227.0/256);
+const vec3 FLOWER_COLRS[] = {vec3(0.8, 0.2, 0.2), vec3(0.0, 0.4, 0.2), vec3(0.5, 0.5, 0.1), vec3(0.95, 0.95, 0.95)};
+
+vec4 getColor(uint material, float d, vec3 hit)
 {
-    vec4 finalColor;
+    vec3 c = vec3(0.0);
+    switch (material)
+    {
+        case MAT_STONE:
+            c = vec3(0.15);
+            break;
+        case MAT_STONE2:
+            c = vec3(0.2);
+            break;
+        case MAT_STONE3:
+            c = vec3(0.05);
+            break;
+        case MAT_GRASS:
+            c = vec3(0.0, 0.5, 0.0) * (1.0 - (semiRandomFloat(ivec3(hit)) - 0.5) * 0.2);
+            break;
+        case MAT_FLOWER:
+            c = FLOWER_COLRS[int(floor(min(semiRandomFloat(ivec3(hit)) * 4, 3.5)))];
+            break;
+        case MAT_WATER:
+            c = vec3(0.0, 0.1, 0.5);
+            break;
+        default:
+            break;
+    }
+    if (material != MAT_AIR)
+    {
+        c = mix(c, FOG_COLOR, clamp((d - 100.0) / 150.0, 0.0, 1.0));
+    }
+    return vec4(c, 1.0);
+}
+
+vec4 march(vec3 rayOrigin, vec3 rayDir)
+{
     float tMax = 0, tMin = 0;
 
     ivec3 origin = ivec3(0);
@@ -107,11 +154,8 @@ vec4 calculateColor(vec3 rayOrigin, vec3 rayDir)
         size = 1;
     }
 
-
     if (RayIntersectsCube(origin, size, rayOrigin, rayDir, tMin, tMax))
-    {   
-        finalColor = vec4(0.0, 0.0, 0.0, 1.0);
-
+    {
         vec3 hit = rayOrigin;
         float distanceToBox = tMin;
 
@@ -126,60 +170,22 @@ vec4 calculateColor(vec3 rayOrigin, vec3 rayDir)
         uint layer = (value >> 5) & 7;
         uint material = value & 31;
 
-        if (material == 1)
+        if (material != MAT_AIR) return getColor(material, length(rayOrigin - hit), hit);
+
+        for (int i = 0; i < 300; i++)
         {
-            uint value2 = uint(imageLoad(upperVoxelData, TransformIndex(ivec3(hit)) + ivec3(0, 0, 3)));
-            uint material2 = value2 & 31;
-            if (material2 != 1)
-            {
-                return vec4(0.15, 0.15, 0.15, 1.0);
-            }
-            else
-            {
-                return vec4(0.0, 0.5, 0.0, 1.0);
-            }
-            
+            RayIntersectsCube(ivec3(hit), 1, rayOrigin, rayDir, tMin, tMax);
+            distanceToBox = abs(tMin - tMax);
+            hit += rayDir * distanceToBox;
+
+            uint value = uint(imageLoad(upperVoxelData, TransformIndex(ivec3(hit))));
+            uint layer = (value >> 5) & 7;
+            uint material = value & 31;
+
+            if (material != MAT_AIR) return getColor(material, length(rayOrigin - hit), hit);
         }
-        else if (material == 0)
-        {
-            for (int i = 0; i < 700; i++)
-            {
-                RayIntersectsCube(ivec3(hit), 1, rayOrigin, rayDir, tMin, tMax);
-                distanceToBox = abs(tMin - tMax);
-                hit += rayDir * distanceToBox;
-
-                uint value = uint(imageLoad(upperVoxelData, TransformIndex(ivec3(hit))));
-                uint layer = (value >> 5) & 7;
-                uint material = value & 31;
-
-                finalColor = vec4(0.0, 0.0, 0.0, 1.0);
-                if (material == 1)
-                {
-                    float d = length(rayOrigin - hit);
-                    // return vec4(0.15 * (1.0 - d/350.0), 0.15 * (1.0 - d/350.0), 0.15 * (1.0 - d/350.0), 1.0);
-
-                    uint value2 = uint(imageLoad(upperVoxelData, TransformIndex(ivec3(hit)) + ivec3(0, 0, 3)));
-                    uint material2 = value2 & 31;
-
-                    float v = semiRandomFloat(ivec3(hit)) / 15.0;
-                    if (material2 != 1)
-                    {
-                        return vec4((0.15+v) * (1.0 - d/350.0), (0.15+v) * (1.0 - d/350.0), (0.15+v) * (1.0 - d/350.0), 1.0);
-                    }
-                    else
-                    {
-                        return vec4(0.0 * (1.0 - d/350.0) * v, (v + 0.4) * (1.0 - d/350.0), 0.0 * (1.0 - d/350.0) * v, 1.0);
-                    }
-                }
-            }
-        }
-        
     }
-    else
-    {
-        return vec4(0.0, 0.0, 0.0, 1.0);
-    }
-    return finalColor;
+    return vec4(FOG_COLOR, 1.0);
 }
 
 void main()
@@ -195,7 +201,7 @@ void main()
     vec3 rayDir = normalize((copy * rayWorldSpace).xyz);
 
 
-    vec4 finalColor = calculateColor(rayOrigin, rayDir);
+    vec4 finalColor = march(rayOrigin, rayDir);
 
 
     imageStore(imageOutput, pixelCoord, finalColor);
