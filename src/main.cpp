@@ -12,17 +12,13 @@
 #include <limits>
 #include <optional>
 #include <set>
-#include <thread>
-
-#define FNL_IMPL
-#include "FastNoiseLite.hpp"
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONCe
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-static float semiRandomFloat(float x, float y, float z);
+#include "terrain.hpp"
 
 const uint32_t WIDTH = 1920;
 const uint32_t HEIGHT = 1280;
@@ -34,6 +30,7 @@ struct TransformUBO
 };
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
+bool free_cam = false;
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -82,25 +79,11 @@ struct SwapChainSupportDetails {
     std::vector<VkPresentModeKHR> presentModes;
 };
 
-//=================
-//  Materials
-//-----------------
-#define MAT_AIR 0
-#define MAT_STONE 1
-#define MAT_STONE2 2
-#define MAT_STONE3 3
-#define MAT_GRASS 9
-#define MAT_FLOWER 10
-#define MAT_WATER 19
-// ================
-
-#define voxel_mat(voxel) (voxel & 0b11111)
-#define MAT_IS_STONE(mat) (mat >= MAT_STONE && mat <= MAT_STONE3)
-#define MAT_HAS_COLLISION(mat) (mat > MAT_AIR && mat < MAT_FLOWER)
 
 class VoxelEngine {
 public:
     void run() {
+        Materials::initMaterials();
         initWindow();
         initVulkan();
         mainLoop();
@@ -108,6 +91,7 @@ public:
     }
 
 private:
+#pragma region Members
     GLFWwindow* window;
 
     VkInstance instance;
@@ -220,14 +204,15 @@ private:
     VkBuffer voxelChunkMapStagingBuffer;
     VkDeviceMemory voxelChunkMapStagingBufferMemory;
 
-    uint8_t* voxelData;
+    Voxel* voxelData;
     uint8_t* voxelUpperData;
     uint16_t* voxelChunkMapData;
 
-    FastNoiseLite noise;
+    TerrainGenerator terrainGenerator;
 
     double deltaTime = 0;
     double lastTime = 0;
+#pragma endregion
 
     void initWindow() {
         glfwInit();
@@ -240,11 +225,20 @@ private:
 
         glfwSetWindowUserPointer(window, this);
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+        glfwSetKeyCallback(window, key_callback);
     }
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
         auto app = reinterpret_cast<VoxelEngine*>(glfwGetWindowUserPointer(window));
         app->framebufferResized = true;
+    }
+
+    static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
+    {
+        if (key == GLFW_KEY_LEFT_CONTROL && action == GLFW_PRESS)
+        {
+            free_cam = !free_cam;
+        }
     }
 
     void initVulkan() {
@@ -346,13 +340,15 @@ private:
             throw std::runtime_error("validation layers requested, but not available!");
         }
 
-        VkApplicationInfo appInfo{};
-        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        appInfo.pApplicationName = "Voxels";
-        appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-        appInfo.pEngineName = "No Engine";
-        appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-        appInfo.apiVersion = VK_API_VERSION_1_3;
+        VkApplicationInfo appInfo =
+        {
+            .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+            .pApplicationName = "Voxels",
+            .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+            .pEngineName = "No Engine",
+            .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+            .apiVersion = VK_API_VERSION_1_3
+        };
 
         VkInstanceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -592,15 +588,17 @@ private:
     }
 
     void createRenderPass() {
-        VkAttachmentDescription colorAttachment{};
-        colorAttachment.format = swapChainImageFormat;
-        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        VkAttachmentDescription colorAttachment =
+        {
+            .format = swapChainImageFormat,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        };
 
         VkAttachmentReference colorAttachmentRef{};
         colorAttachmentRef.attachment = 0;
@@ -619,14 +617,16 @@ private:
         dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
-        VkRenderPassCreateInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        renderPassInfo.attachmentCount = 1;
-        renderPassInfo.pAttachments = &colorAttachment;
-        renderPassInfo.subpassCount = 1;
-        renderPassInfo.pSubpasses = &subpass;
-        renderPassInfo.dependencyCount = 1;
-        renderPassInfo.pDependencies = &dependency;
+        VkRenderPassCreateInfo renderPassInfo =
+        {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+            .attachmentCount = 1,
+            .pAttachments = &colorAttachment,
+            .subpassCount = 1,
+            .pSubpasses = &subpass,
+            .dependencyCount = 1,
+            .pDependencies = &dependency
+        };
 
         if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
             throw std::runtime_error("failed to create render pass!");
@@ -792,20 +792,24 @@ private:
     void createVoxelResources()
     {
         // Create the image (texture)
-        VkImageCreateInfo imageInfo = {};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_3D;
-        imageInfo.extent.width = 1024;
-        imageInfo.extent.height = 1024;
-        imageInfo.extent.depth = 1024;
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.format = VK_FORMAT_R8_UINT;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        VkImageCreateInfo imageInfo =
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_3D,
+            .format = VK_FORMAT_R8_UINT,
+            .extent = {
+                .width = 1024,
+                .height = 1024,
+                .depth = 1024,
+            },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
 
         if (vkCreateImage(device, &imageInfo, nullptr, &voxelTexture) != VK_SUCCESS) {
             throw std::runtime_error("failed to create texture image!");
@@ -826,20 +830,27 @@ private:
 
         vkBindImageMemory(device, voxelTexture, voxelTexturesMemory, 0);
 
-        VkImageViewCreateInfo viewInfo = {};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = voxelTexture;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
-        viewInfo.format = VK_FORMAT_R8_UINT;
-        viewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-        viewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-        viewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-        viewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = 1;
+        VkImageViewCreateInfo viewInfo =
+        {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = voxelTexture,
+            .viewType = VK_IMAGE_VIEW_TYPE_3D,
+            .format = VK_FORMAT_R8_UINT,
+            .components = {
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY
+            },
+            .subresourceRange =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1
+            }
+        };
 
         if (vkCreateImageView(device, &viewInfo, nullptr, &voxelImageView) != VK_SUCCESS) {
             throw std::runtime_error("failed to create texture image view!");
@@ -885,7 +896,8 @@ private:
         
         transitionImageLayout(voxelTexture, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, 1);
 
-        GenerateTerrain();
+        voxelData = new Voxel[TerrainGenerator::CHUNK_SIZE * TerrainGenerator::CHUNK_SIZE * TerrainGenerator::CHUNK_SIZE]();
+        cameraPosition = terrainGenerator.Generate(voxelData);
 
         // Upper
         {
@@ -1077,86 +1089,6 @@ private:
             voxelChunkMapData[i] = i;
         }
 }
-    }
-
-    void GenerateTerrain()
-    {
-        // Voxel Data
-        auto it = std::chrono::system_clock::now();
-        voxelData = new uint8_t[1024 * 1024 * 1024]();
-#define vox(x,y,z) voxelData[(z) * 1024 * 1024 + (y) * 1024 + (x)]
-
-#define TERRAIN_SCALE 4
-#define TERRAIN_AREA (1024/4)
-
-        //printf("hwc: %i", std::thread::hardware_concurrency());
-        printf("Generating\n");
-        const int WORKERS = 12;
-        const int SLICE_THICKNESS = TERRAIN_AREA / WORKERS;
-
-        std::thread* threads[WORKERS]{};
-
-        for (int i = 0; i < WORKERS; i++)
-        {
-            threads[i] = new std::thread{&TerrainWork, voxelData, &noise, i * SLICE_THICKNESS, SLICE_THICKNESS};
-        }
-
-        puts("");
-        for (int i = 0; i < WORKERS; i++)
-        {
-            threads[i]->join();
-            printf("\rProgress: %.1f", (float)i / WORKERS * 100);
-        }
-
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - it);
-        printf("\nTIME: %lli\n\n", ms.count());
-    }
-
-    static void TerrainWork(uint8_t* voxelData, FastNoiseLite* noise, int z0, int SLICE_THICKNESS)
-    {
-        for (int z = z0; z < z0 + SLICE_THICKNESS; z++)
-        {
-            for (int y = 0; y < TERRAIN_AREA; y++)
-            {
-                for (int x = 0; x < TERRAIN_AREA; x++)
-                {
-                    uint8_t base = 0b11100000;
-                    float v = noise->GetNoise(x * 0.1f * TERRAIN_SCALE, y * 0.1f * TERRAIN_SCALE, z * 0.4f * TERRAIN_SCALE);
-
-                    int material = v <= 0.1;
-                    if (material != MAT_AIR)
-                    {
-                        if (z > 0 && (voxel_mat(vox(x, y, z - 1)) == MAT_AIR))
-                        {
-                            material = MAT_GRASS;
-                            float v = semiRandomFloat(x, y, z);
-                            if (v < 0.08)
-                            {
-                                vox(x, y, z - 1) |= MAT_GRASS;
-
-                                if (z > 1 && v < 0.008)
-                                {
-                                    vox(x, y, z - 2) |= MAT_FLOWER;
-                                }
-                            }
-                        }
-                        else
-                        {
-                            float v = noise->GetNoise(x * 1.5f * TERRAIN_SCALE, y * 1.5f * TERRAIN_SCALE, z * 1.f * TERRAIN_SCALE);
-                            int32_t i = *((int32_t*)&v);
-                            int32_t i2 = i | 9;
-                            float v2 = *((float*)(&i2));
-                            if (v2 < -0.15)
-                            {
-                                material = (i & 15) < 2 ? MAT_STONE2 : MAT_STONE3;
-                            }
-                        }
-                    }
-
-                    vox(x, y, z) = base | material;
-                }
-            }
-        }
     }
 
     void UpdateVoxels(VkCommandBuffer commandBuffer, void* data, uint8_t section)
@@ -1639,22 +1571,24 @@ private:
 
             // image Sampler
 
-            VkSamplerCreateInfo samplerCreateInfo = {};
-            samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-            samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
-            samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
-            samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-            samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
-            samplerCreateInfo.anisotropyEnable = VK_FALSE;
-            samplerCreateInfo.maxAnisotropy = 1.0f;
-            samplerCreateInfo.compareEnable = VK_FALSE;
-            samplerCreateInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-            samplerCreateInfo.minLod = 0.0f;
-            samplerCreateInfo.maxLod = VK_LOD_CLAMP_NONE;
-            samplerCreateInfo.mipLodBias = 0.0f;
+            VkSamplerCreateInfo samplerCreateInfo = 
+            {
+                .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+                .magFilter = VK_FILTER_LINEAR,
+                .minFilter = VK_FILTER_LINEAR,
+                .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                .mipLodBias = 0.0f,
+                .anisotropyEnable = VK_FALSE,
+                .maxAnisotropy = 1.0f,
+                .compareEnable = VK_FALSE,
+                .compareOp = VK_COMPARE_OP_ALWAYS,
+                .minLod = 0.0f,
+                .maxLod = VK_LOD_CLAMP_NONE,
+                .borderColor = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK
+            };
 
             if (vkCreateSampler(device, &samplerCreateInfo, nullptr, &imageSampler[i]) != VK_SUCCESS)
             {
@@ -1667,14 +1601,16 @@ private:
             imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
             imageInfo.sampler = imageSampler[i];
 
-            VkWriteDescriptorSet writeDescriptorSet = {};
-            writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writeDescriptorSet.dstSet = descriptorSets[i];
-            writeDescriptorSet.dstBinding = 0;
-            writeDescriptorSet.dstArrayElement = 0;
-            writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writeDescriptorSet.descriptorCount = 1;
-            writeDescriptorSet.pImageInfo = &imageInfo;
+            VkWriteDescriptorSet writeDescriptorSet =
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptorSets[i],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo = &imageInfo
+            };
 
             vkUpdateDescriptorSets(device, 1, &writeDescriptorSet, 0, nullptr);
         }
@@ -1689,14 +1625,16 @@ private:
                 swapChainImageViews[i]
             };
 
-            VkFramebufferCreateInfo framebufferInfo{};
-            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            framebufferInfo.renderPass = renderPass;
-            framebufferInfo.attachmentCount = 1;
-            framebufferInfo.pAttachments = attachments;
-            framebufferInfo.width = swapChainExtent.width;
-            framebufferInfo.height = swapChainExtent.height;
-            framebufferInfo.layers = 1;
+            VkFramebufferCreateInfo framebufferInfo =
+            {
+                .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                .renderPass = renderPass,
+                .attachmentCount = 1,
+                .pAttachments = attachments,
+                .width = swapChainExtent.width,
+                .height = swapChainExtent.height,
+                .layers = 1
+            };
 
             if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS) {
                 throw std::runtime_error("failed to create framebuffer!");
@@ -2064,44 +2002,80 @@ private:
 
     void UpdateUBO()
     {
-        cameraPosition.z += cameraVelocity.z * deltaTime;
-        cameraTargetPoint.z += cameraVelocity.z * deltaTime;
+        const int CHARACTER_THICKNESS = 3;
+        const int CHARACTER_HEIGHT = 23;
+        const int CHARACTER_EYES = 3;
 
-        glm::ivec3 intCameraPosition = glm::ivec3(cameraPosition) * -1;
+        const int H_CHARACTER_THICKNESS = CHARACTER_THICKNESS / 2;
 
+        bool
+            is_grounded = false,
+            is_walled0 = false,
+            is_walled1 = false,
+            is_walled2 = false,
+            is_walled3 = false,
+            is_ouch = false;
 
-        // floor
-        bool is_grounded = false;
-        for (int x = -1; x < 2; x++)
+        if (!free_cam)
         {
-            for (int y = -1; y < 2; y++)
+            cameraPosition.z += cameraVelocity.z * deltaTime;
+            cameraTargetPoint.z += cameraVelocity.z * deltaTime;
+
+            glm::ivec3 intCameraPosition = glm::ivec3(cameraPosition) * -1;
+
+            // floor
+            for (int x = -H_CHARACTER_THICKNESS; x <= H_CHARACTER_THICKNESS; x++)
             {
-                is_grounded |= MAT_HAS_COLLISION(voxel_mat(vox(intCameraPosition.x + x, intCameraPosition.y + y, intCameraPosition.z + 20)));
+                for (int y = -H_CHARACTER_THICKNESS; y <= H_CHARACTER_THICKNESS; y++)
+                {
+                    is_grounded |= Voxels::hasCollision(vox(intCameraPosition.x + x, intCameraPosition.y + y, intCameraPosition.z + CHARACTER_HEIGHT - CHARACTER_EYES + 1));
+                }
             }
-        }
 
-        // ceiling
-        bool is_ouch = false;
-        for (int x = -1; x < 2; x++)
-        {
-            for (int y = -1; y < 2; y++)
+            // sides
+            for (int z = -CHARACTER_EYES; z <= CHARACTER_HEIGHT - CHARACTER_EYES; z++)
             {
-                is_ouch |= MAT_HAS_COLLISION(voxel_mat(vox(intCameraPosition.x + x, intCameraPosition.y + y, intCameraPosition.z - 4)));
+                for (int x = -H_CHARACTER_THICKNESS; x <= H_CHARACTER_THICKNESS; x++)
+                {
+                    is_walled0 |= Voxels::hasCollision(vox(intCameraPosition.x + x, intCameraPosition.y + H_CHARACTER_THICKNESS, intCameraPosition.z + z));
+                }
+                for (int x = -H_CHARACTER_THICKNESS; x <= H_CHARACTER_THICKNESS; x++)
+                {
+                    is_walled1 |= Voxels::hasCollision(vox(intCameraPosition.x + x, intCameraPosition.y - H_CHARACTER_THICKNESS, intCameraPosition.z + z));
+                }
+                for (int y = -H_CHARACTER_THICKNESS; y <= H_CHARACTER_THICKNESS; y++)
+                {
+                    is_walled2 |= Voxels::hasCollision(vox(intCameraPosition.x + H_CHARACTER_THICKNESS, intCameraPosition.y + y, intCameraPosition.z + z));
+                }
+                for (int y = -H_CHARACTER_THICKNESS; y <= H_CHARACTER_THICKNESS; y++)
+                {
+                    is_walled3 |= Voxels::hasCollision(vox(intCameraPosition.x - H_CHARACTER_THICKNESS, intCameraPosition.y + y, intCameraPosition.z + z));
+                }
             }
-        }
+
+            // ceiling
+            for (int x = -H_CHARACTER_THICKNESS; x <= H_CHARACTER_THICKNESS; x++)
+            {
+                for (int y = -H_CHARACTER_THICKNESS; y <= H_CHARACTER_THICKNESS; y++)
+                {
+                    is_ouch |= Voxels::hasCollision(vox(intCameraPosition.x + x, intCameraPosition.y + y, intCameraPosition.z - CHARACTER_EYES + 1));
+                }
+            }
 
 
-        if (is_grounded)
-        {
-            cameraVelocity.z = 0;
-        }
-        else if (is_ouch)
-        {
-            cameraVelocity.z = -fabsf(cameraVelocity.z) * 0.8;
-        }
-        else
-        {
-            cameraVelocity.z -= 9.8 * 7 * deltaTime;
+
+            if (is_grounded)
+            {
+                cameraVelocity.z = 0;
+            }
+            else if (is_ouch)
+            {
+                cameraVelocity.z = -fabsf(cameraVelocity.z) * 0.8;
+            }
+            else
+            {
+                cameraVelocity.z -= 9.8 * 7 * deltaTime;
+            }
         }
 
         if (isMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT)) {
@@ -2110,18 +2084,37 @@ private:
 
             float deltaTime = 0.1f;
 
-            movementSpeed = isKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 20 : 7.0;
+            movementSpeed = isKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 20.0f : 7.0f;
             
-            if (isKeyPressed(GLFW_KEY_S)) { cameraPosition += movementSpeed * deltaTime * glm::normalize(cameraTargetPoint - cameraPosition) * glm::vec3(1, 1, 0); }
-            if (isKeyPressed(GLFW_KEY_W)) { cameraPosition -= movementSpeed * deltaTime * glm::normalize(cameraTargetPoint - cameraPosition) * glm::vec3(1, 1, 0); }
-            if (isKeyPressed(GLFW_KEY_D)) { cameraPosition -= glm::normalize(glm::cross(cameraTargetPoint - cameraPosition, glm::vec3(0.0f, 0.0f, 1.0f))) * movementSpeed * deltaTime * glm::vec3(1, 1, 0); }
-            if (isKeyPressed(GLFW_KEY_A)) { cameraPosition += glm::normalize(glm::cross(cameraTargetPoint - cameraPosition, glm::vec3(0.0f, 0.0f, 1.0f))) * movementSpeed * deltaTime * glm::vec3(1, 1, 0); }
+            const glm::vec3 lookDistance = cameraTargetPoint - cameraPosition;
+            glm::vec3 movementDirection{ 0 };
+
+            if (isKeyPressed(GLFW_KEY_S)) movementDirection += glm::normalize(lookDistance) * glm::vec3(1, 1, 0);
+            if (isKeyPressed(GLFW_KEY_W)) movementDirection -= glm::normalize(lookDistance) * glm::vec3(1, 1, 0);
+            if (isKeyPressed(GLFW_KEY_D)) movementDirection -= glm::normalize(glm::cross(lookDistance, glm::vec3(0.0f, 0.0f, 1.0f))) * glm::vec3(1, 1, 0);
+            if (isKeyPressed(GLFW_KEY_A)) movementDirection += glm::normalize(glm::cross(lookDistance, glm::vec3(0.0f, 0.0f, 1.0f))) * glm::vec3(1, 1, 0);
+
+            glm::vec3 newCameraPosition = cameraPosition + movementDirection * movementSpeed * deltaTime;
+
+            if (is_walled0 && newCameraPosition.y > 0) newCameraPosition.y = cameraPosition.y;
+            if (is_walled1 && newCameraPosition.y < 0) newCameraPosition.y = cameraPosition.y;
+            if (is_walled2 && newCameraPosition.x > 0) newCameraPosition.x = cameraPosition.x;
+            if (is_walled3 && newCameraPosition.x < 0) newCameraPosition.x = cameraPosition.x;
+
+            cameraPosition = newCameraPosition;
 
             // Q and E for vertical movement
             if (isKeyPressed(GLFW_KEY_Q)) { cameraPosition.z -= movementSpeed * 2 * deltaTime; }
-            if ((isKeyPressed(GLFW_KEY_SPACE) || isKeyPressed(GLFW_KEY_E)) && is_grounded)
+            if ((isKeyPressed(GLFW_KEY_SPACE) || isKeyPressed(GLFW_KEY_E)))
             {
-                cameraVelocity.z += 400 * deltaTime;
+                if (free_cam)
+                {
+                    cameraPosition.z += 2 * movementSpeed * deltaTime;
+                }
+                else if (is_grounded)
+                {
+                    cameraVelocity.z += 400 * deltaTime;
+                }
             }
 
             double currentMouseX, currentMouseY;
@@ -2166,7 +2159,7 @@ private:
 
         ubo.view = glm::inverse(glm::lookAt(cameraPosition, cameraTargetPoint, glm::vec3(0.0f, 0.0f, 1.0f)));
 
-        printf("\rPOSITION: %f %f %f\tDELTA TIME: %f\to: %i", cameraPosition.x, cameraPosition.y, cameraPosition.z, deltaTime, is_ouch);
+        printf("\rPOSITION: %f %f %f\tDELTA TIME: %f\to: %i", cameraPosition.x, cameraPosition.y, cameraPosition.z, deltaTime, is_grounded);
 
         memcpy(uniformBuffersMapped, &ubo, sizeof(TransformUBO));
     }
@@ -2544,19 +2537,7 @@ private:
     }
 };
 
-static float semiRandomFloat(float x, float y, float z) {
-    // A simple hashing function using the input vector components
-    uint32_t hash = x * 123456789 + y * 987654321 + z * 567890123;
 
-    // A bitwise operation to mix the hash value
-    hash = (hash ^ (hash >> 21)) * 2654435761u;
-    hash = hash ^ (hash >> 21);
-    hash = hash * 668265263;
-    hash = hash ^ (hash >> 21);
-
-    // Return a float between 0 and 1 based on the hash
-    return (float)(hash & 0xFFFFFFF) / (float)0xFFFFFFF;
-}
 
 int main() {
     VoxelEngine app;

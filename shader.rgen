@@ -24,7 +24,8 @@ layout (set = 0, binding = 1) uniform Transform
 #define MAT_STONE 1
 #define MAT_STONE2 2
 #define MAT_STONE3 3
-#define MAT_GRASS 9
+#define MAT_GRASS 8
+#define MAT_TALL_GRASS 9
 #define MAT_FLOWER 10
 #define MAT_WATER 19
 // ================
@@ -108,7 +109,7 @@ float semiRandomFloat(ivec3 inp) {
 const vec3 FOG_COLOR = vec3(138.0/256.0, 236.0/256.0, 227.0/256);
 const vec3 FLOWER_COLRS[] = {vec3(0.8, 0.2, 0.2), vec3(0.0, 0.4, 0.2), vec3(0.5, 0.5, 0.1), vec3(0.95, 0.95, 0.95)};
 
-vec4 getColor(uint material, float d, vec3 hit)
+vec4 getColor(uint material, float d, vec3 pos)
 {
     vec3 c = vec3(0.0);
     switch (material)
@@ -123,10 +124,13 @@ vec4 getColor(uint material, float d, vec3 hit)
             c = vec3(0.05);
             break;
         case MAT_GRASS:
-            c = vec3(0.0, 0.5, 0.0) * (1.0 - (semiRandomFloat(ivec3(hit)) - 0.5) * 0.2);
+            c = vec3(0.0, 0.5, 0.0) * (1.0 - (semiRandomFloat(ivec3(pos)) - 0.5) * 0.2);
+            break;
+        case MAT_TALL_GRASS:
+            c = vec3(0.0, 0.5, 0.0) * (1 - mod(pos.z, 3.0) / 30.0 - semiRandomFloat(ivec3(pos)) / 10.0);
             break;
         case MAT_FLOWER:
-            c = FLOWER_COLRS[int(floor(min(semiRandomFloat(ivec3(hit)) * 4, 3.5)))];
+            c = FLOWER_COLRS[int(floor(min(semiRandomFloat(ivec3(pos)) * 4, 3.5)))];
             break;
         case MAT_WATER:
             c = vec3(0.0, 0.1, 0.5);
@@ -136,7 +140,7 @@ vec4 getColor(uint material, float d, vec3 hit)
     }
     if (material != MAT_AIR)
     {
-        c = mix(c, FOG_COLOR, clamp((d - 100.0) / 150.0, 0.0, 1.0));
+        c = mix(c, FOG_COLOR, clamp((d - 150.0) / 50.0, 0.0, 1.0));
     }
     return vec4(c, 1.0);
 }
@@ -166,11 +170,12 @@ vec4 march(vec3 rayOrigin, vec3 rayDir)
         hit += rayDir * distanceToBox; //distanceToBox;
         hit += rayDir * 0.001;
 
-        uint value = uint(imageLoad(upperVoxelData, TransformIndex(ivec3(hit))));
+        ivec3 pos = TransformIndex(ivec3(hit));
+        uint value = uint(imageLoad(upperVoxelData, pos));
         uint layer = (value >> 5) & 7;
         uint material = value & 31;
 
-        if (material != MAT_AIR) return getColor(material, length(rayOrigin - hit), hit);
+        if (material != MAT_AIR) return getColor(material, length(rayOrigin - hit), pos);
 
         for (int i = 0; i < 300; i++)
         {
@@ -178,11 +183,12 @@ vec4 march(vec3 rayOrigin, vec3 rayDir)
             distanceToBox = abs(tMin - tMax);
             hit += rayDir * distanceToBox;
 
-            uint value = uint(imageLoad(upperVoxelData, TransformIndex(ivec3(hit))));
+            ivec3 pos = TransformIndex(ivec3(hit));
+            uint value = uint(imageLoad(upperVoxelData, pos));
             uint layer = (value >> 5) & 7;
             uint material = value & 31;
 
-            if (material != MAT_AIR) return getColor(material, length(rayOrigin - hit), hit);
+            if (material != MAT_AIR) return getColor(material, length(rayOrigin - hit), pos);
         }
     }
     return vec4(FOG_COLOR, 1.0);
